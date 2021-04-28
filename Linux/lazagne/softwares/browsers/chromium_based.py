@@ -133,13 +133,16 @@ class ChromiumBased(ModuleInfo):
 
     def run(self):
         all_passwords = []
-
+        scaned = []
         for path in self.get_paths():
+            if path in scaned:
+                continue
             tmp = u'/tmp/chrome.db'
             shutil.copyfile(path, tmp)
 
             for pw in self.get_passwords(tmp):
                 all_passwords.append(pw)
+            scaned.append(path)
 
         return all_passwords
 
