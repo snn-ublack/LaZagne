@@ -23,7 +23,7 @@ class ChromiumBased(ModuleInfo):
         self.database_query = 'SELECT action_url, username_value, password_value FROM logins'
         ModuleInfo.__init__(self, browser_name, 'browsers', winapi_used=True)
 
-    def _get_database_dirs(self):
+    def _get_database_dirs(self, db_filenames=[]):
         """
         Return database directories for all profiles within all paths
         """
@@ -55,10 +55,12 @@ class ChromiumBased(ModuleInfo):
                         master_key = master_key[5:]  # removing DPAPI
                         master_key = Win32CryptUnprotectData(master_key, is_current_user=constant.is_current_user,
                                                 user_dpapi=constant.user_dpapi)
-                    except Exception:
+
+                    except Exception as e:
                         master_key = None
 
                 # Each profile has its own password database
+                db_filenames = db_filenames or ['login data', 'ya passman data']
                 for profile in profiles:
                     # Some browsers use names other than "Login Data"
                     # Like YandexBrowser - "Ya Login Data", UC Browser - "UC Login Data.18"
@@ -67,7 +69,7 @@ class ChromiumBased(ModuleInfo):
                     except Exception:
                         continue
                     for db in db_files:
-                        if db.lower() in ['login data', 'ya passman data']:
+                        if db.lower() in db_filenames:
                             databases.add((os.path.join(path, profile, db), master_key))
         return databases
 
@@ -134,31 +136,29 @@ class ChromiumBased(ModuleInfo):
                     # Passwords are stored using AES-256-GCM algorithm
                     # The key used to encrypt is stored on the credential manager
 
-                    # yandex_enckey:
-                    #   - 4 bytes should be removed to be 256 bits
-                    #   - these 4 bytes correspond to the nonce ?
+                    # yandex_enckey: 
+                    #   - 4 bytes should be removed to be 256 bits 
+                    #   - these 4 bytes correspond to the nonce ? 
 
                     # cipher = AES.new(yandex_enckey, AES.MODE_GCM)
                     # plaintext = cipher.decrypt(password)
                     # Failed...
                 else:
                     # Decrypt the Password
-                    if password and password.startswith(b'v10'):  # chromium > v80
-                        if master_key:
-                            password = self._decrypt_v80(password, master_key)
-                    else:
+                    try:
+                        password_bytes = Win32CryptUnprotectData(password, is_current_user=constant.is_current_user,
+                                                                user_dpapi=constant.user_dpapi)
+                    except AttributeError:
                         try:
                             password_bytes = Win32CryptUnprotectData(password, is_current_user=constant.is_current_user,
-                                                                    user_dpapi=constant.user_dpapi)
-                        except AttributeError:
-                            try:
-                                password_bytes = Win32CryptUnprotectData(password, is_current_user=constant.is_current_user,
-                                                                     user_dpapi=constant.user_dpapi)
-                            except:
-                                password_bytes = None
+                                                                 user_dpapi=constant.user_dpapi)
+                        except:
+                            password_bytes = None
 
-                        if password_bytes not in [None, False]:
-                            password = password_bytes.decode("utf-8")
+                    if password_bytes is not None:
+                        password = password_bytes.decode("utf-8")
+                    elif master_key:
+                        password = self._decrypt_v80(password, master_key)
 
                 if not url and not login and not password:
                     continue
@@ -213,12 +213,42 @@ class ChromiumBased(ModuleInfo):
             path = self.copy_db(database_path)
             if path:
                 try:
-                    credentials.extend(self._export_credentials(path, is_yandex, master_key))
-                except Exception:
+                    items = self._export_credentials(path, is_yandex, master_key)
+                    credentials.extend(items)
+                except Exception as e:
+                    print(e)
                     self.debug(traceback.format_exc())
                 self.clean_file(path)
-
         return [{'URL': url, 'Login': login, 'Password': password} for url, login, password in set(credentials)]
+
+    def cookies(self):
+        def dict_factory(cursor, row):
+            d = {}
+            for idx, col in enumerate(cursor.description):
+                d[col[0]] = row[idx]
+            return d
+
+        credentials = []
+        for database_path, master_key in self._get_database_dirs(db_filenames=['cookies']):
+            is_yandex = False if 'yandex' not in database_path.lower() else True
+            query = 'SELECT name, encrypted_value FROM cookies'
+            temp_database = self.copy_db(database_path)
+            conn = sqlite3.connect(temp_database)
+            conn.row_factory = dict_factory
+            cursor = conn.cursor()
+            #  cursor.execute('SELECT host_key, name, value, encrypted_value FROM cookies')
+            cursor.execute('SELECT * FROM cookies')
+            data = []
+            for item in cursor.fetchall():
+                #  decrypted_value = win32crypt.CryptUnprotectData(encrypted_value, None, None, None, 0)[1].decode('utf-8') or value or 0
+                de_encrypted_value = self._decrypt_v80(item['encrypted_value'], master_key)
+                del item['encrypted_value']
+                item['value'] = de_encrypted_value;
+                # item['path'] = database_path
+                credentials.append(item)
+            cursor.close()
+            self.clean_file(temp_database)
+        return credentials
 
 
 # Name, path or a list of paths
@@ -230,7 +260,6 @@ chromium_browsers = [
     (u'chedot', u'{LOCALAPPDATA}\\Chedot\\User Data'),
     (u'chrome canary', u'{LOCALAPPDATA}\\Google\\Chrome SxS\\User Data'),
     (u'chromium', u'{LOCALAPPDATA}\\Chromium\\User Data'),
-    (u'chromium edge', u'{LOCALAPPDATA}\\Microsoft\\Edge\\User Data'),
     (u'coccoc', u'{LOCALAPPDATA}\\CocCoc\\Browser\\User Data'),
     (u'comodo dragon', u'{LOCALAPPDATA}\\Comodo\\Dragon\\User Data'),  # Comodo IceDragon is Firefox-based
     (u'elements browser', u'{LOCALAPPDATA}\\Elements Browser\\User Data'),
